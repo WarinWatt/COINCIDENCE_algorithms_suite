@@ -27,8 +27,13 @@ diversity selection through the reusable permutation-problem interface.
 - Sudoku block-permutation encoding
 - Knight's Tour evaluation
 - RNA secondary-structure permutation search (optional ViennaRNA scoring)
+- TSP and bi-objective MO-TSP, with deterministic preloaded fixtures of 8, 12, 16, 20, and 24 cities
 
 These modules are research examples and reusable evaluators, not applications.
+
+See `examples/tsp_coin_tutorial.ipynb` for an executable tutorial covering a
+closed tour, single-objective learning progress, a two-objective Pareto
+archive, and a Pareto-front plot.
 
 ## Installation
 
