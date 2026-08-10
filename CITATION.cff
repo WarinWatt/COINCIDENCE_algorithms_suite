@@ -5,7 +5,18 @@ type: software
 version: 0.1.0
 date-released: 2026-08-10
 license: Apache-2.0
+abstract: >-
+  A reusable Python suite of COINcidence algorithms, histogram sampling
+  variants, multi-objective selection, permutation-problem contracts, and
+  reproducible teaching and research examples.
+keywords:
+  - coincidence algorithm
+  - permutation optimization
+  - multi-objective optimization
+  - estimation of distribution algorithm
+  - combinatorial optimization
 authors:
   - family-names: Wattanapornprom
     given-names: Warin
 repository-code: "https://github.com/WarinWatt/COINCIDENCE_algorithms_suite"
+url: "https://github.com/WarinWatt/COINCIDENCE_algorithms_suite"
