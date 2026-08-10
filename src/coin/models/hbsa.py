@@ -1,0 +1,233 @@
+"""Reusable histogram-based sampling algorithms for permutation problems.
+
+EHBSA and NHBSA are estimation-of-distribution models, not incremental COIN
+presets.  They rebuild a histogram from a selected elite cohort each
+generation and support the paper's without-template (WO) and with-template
+(WT) sampling families.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+import numpy as np
+
+from coin.core.random_state import SplitMix64
+from coin.learning.statistics import ranked_population
+
+from .edge import EdgeConfig
+
+SamplingMode = Literal["wo", "wt"]
+
+
+@dataclass(frozen=True, slots=True)
+class HBSAConfig:
+    problem_size: int
+    population_size: int = 100
+    selection_ratio: int = 50
+    bias_ratio: float = 0.005
+    sampling_mode: SamplingMode = "wo"
+    template_sample_ratio: int = 50
+    objective: Literal["min", "max"] = "min"
+    circular_edges: bool = False
+
+    def __post_init__(self) -> None:
+        if self.problem_size < 2:
+            raise ValueError("problem_size must be at least 2")
+        if self.population_size < 1:
+            raise ValueError("population_size must be positive")
+        if not 1 <= self.selection_ratio <= 100:
+            raise ValueError("selection_ratio must be between 1 and 100")
+        if self.bias_ratio <= 0:
+            raise ValueError("bias_ratio must be positive")
+        if self.sampling_mode not in ("wo", "wt"):
+            raise ValueError("sampling_mode must be 'wo' or 'wt'")
+        if not 1 <= self.template_sample_ratio <= 100:
+            raise ValueError("template_sample_ratio must be between 1 and 100")
+
+
+@dataclass(slots=True)
+class HistogramStatistics:
+    histogram: np.ndarray
+    selected: np.ndarray
+    population: np.ndarray
+    fitness: np.ndarray
+
+
+def _legacy_config(config: EdgeConfig) -> HBSAConfig:
+    """Compatibility adapter for callers written before HBSA became a library."""
+    return HBSAConfig(
+        problem_size=config.problem_size,
+        population_size=config.population_size,
+        selection_ratio=max(1, config.reward_ratio),
+        objective=config.objective,
+    )
+
+
+class _HistogramSampler:
+    def __init__(self, config: HBSAConfig | EdgeConfig, *, seed: int = 0):
+        self.config = _legacy_config(config) if isinstance(config, EdgeConfig) else config
+        self._rng = SplitMix64(seed)
+        self.histogram: np.ndarray | None = None
+        self.templates: np.ndarray | None = None
+        self.template_fitness: np.ndarray | None = None
+        self._pending_parents: list[np.ndarray] = []
+        self._pending_parent_fitness: list[float] = []
+        self.effective_population: np.ndarray | None = None
+        self.effective_fitness: np.ndarray | None = None
+
+    def _random_permutation(self) -> np.ndarray:
+        result = np.arange(self.config.problem_size, dtype=np.int16)
+        for index in range(len(result) - 1, 0, -1):
+            other = self._rng.randbelow(index + 1)
+            result[index], result[other] = result[other], result[index]
+        return result
+
+    def _weighted_choice(self, candidates: np.ndarray, weights: np.ndarray) -> int:
+        scaled = np.asarray(weights, dtype=np.float64)
+        total = float(scaled.sum())
+        if total <= 0 or not np.isfinite(total):
+            return int(candidates[self._rng.randbelow(len(candidates))])
+        threshold = (self._rng.randbelow(1 << 53) / float(1 << 53)) * total
+        cumulative = 0.0
+        for candidate, weight in zip(candidates, scaled):
+            cumulative += float(weight)
+            if threshold < cumulative:
+                return int(candidate)
+        return int(candidates[-1])
+
+    def _sample_wo(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def _sample_positions(self) -> np.ndarray:
+        count = max(1, round(self.config.problem_size * self.config.template_sample_ratio / 100))
+        positions = np.arange(self.config.problem_size, dtype=np.int16)
+        for index in range(len(positions) - 1, 0, -1):
+            other = self._rng.randbelow(index + 1)
+            positions[index], positions[other] = positions[other], positions[index]
+        return np.sort(positions[:count])
+
+    def _sample_wt(self, template: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+    def generate_population(self) -> np.ndarray:
+        self._pending_parents = []
+        self._pending_parent_fitness = []
+        if self.histogram is None:
+            return np.vstack([self._random_permutation() for _ in range(self.config.population_size)])
+        population = []
+        template_order = np.arange(len(self.templates), dtype=np.int16) if self.templates is not None else None
+        if template_order is not None:
+            for index in range(len(template_order) - 1, 0, -1):
+                other = self._rng.randbelow(index + 1)
+                template_order[index], template_order[other] = template_order[other], template_order[index]
+        for candidate_index in range(self.config.population_size):
+            if self.config.sampling_mode == "wt" and self.templates is not None:
+                template_index = int(template_order[candidate_index % len(template_order)])
+                template = self.templates[template_index]
+                self._pending_parents.append(template.copy())
+                self._pending_parent_fitness.append(float(self.template_fitness[template_index]))
+                population.append(self._sample_wt(template))
+            else:
+                population.append(self._sample_wo())
+        return np.asarray(population, dtype=np.int16)
+
+    def statistics(self, population: np.ndarray, fitness: np.ndarray) -> tuple[HistogramStatistics, None]:
+        survivors = np.asarray(population).copy()
+        survivor_fitness = np.asarray(fitness, dtype=float).copy()
+        if self.config.sampling_mode == "wt" and self._pending_parents:
+            parents = np.asarray(self._pending_parents)
+            parent_fitness = np.asarray(self._pending_parent_fitness)
+            child_is_better = survivor_fitness < parent_fitness if self.config.objective == "min" else survivor_fitness > parent_fitness
+            survivors[~child_is_better] = parents[~child_is_better]
+            survivor_fitness[~child_is_better] = parent_fitness[~child_is_better]
+        order = np.argsort(survivor_fitness)
+        if self.config.objective == "max":
+            order = order[::-1]
+        count = max(1, round(len(survivors) * self.config.selection_ratio / 100))
+        selected = survivors[order[:count]]
+        self.effective_population = survivors
+        self.effective_fitness = survivor_fitness
+        return HistogramStatistics(
+            self._build_histogram(selected), selected.copy(), survivors, survivor_fitness
+        ), None
+
+    def update(self, statistics: HistogramStatistics, _unused: None) -> None:
+        self.histogram = statistics.histogram
+        self.templates = statistics.population.copy()
+        self.template_fitness = statistics.fitness.copy()
+
+    def _build_histogram(self, selected: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+
+class EHBSA(_HistogramSampler):
+    """Edge Histogram-Based Sampling Algorithm (directed by default)."""
+
+    def _build_histogram(self, selected: np.ndarray) -> np.ndarray:
+        n = self.config.problem_size
+        expected = len(selected) / max(1, n - 1)
+        histogram = np.full((n, n), expected * self.config.bias_ratio, dtype=np.float64)
+        np.fill_diagonal(histogram, 0.0)
+        for permutation in selected:
+            for index in range(n - 1):
+                histogram[int(permutation[index]), int(permutation[index + 1])] += 1.0
+            if self.config.circular_edges:
+                histogram[int(permutation[-1]), int(permutation[0])] += 1.0
+        return histogram
+
+    def _sample_wo(self) -> np.ndarray:
+        n = self.config.problem_size
+        result = np.empty(n, dtype=np.int16)
+        used = np.zeros(n, dtype=bool)
+        result[0] = self._rng.randbelow(n); used[result[0]] = True
+        for position in range(1, n):
+            candidates = np.flatnonzero(~used)
+            chosen = self._weighted_choice(candidates, self.histogram[int(result[position - 1]), candidates])
+            result[position] = chosen; used[chosen] = True
+        return result
+
+    def _sample_wt(self, template: np.ndarray) -> np.ndarray:
+        sampled_positions = self._sample_positions()
+        result = np.asarray(template, dtype=np.int16).copy()
+        available = np.asarray(sorted(int(result[position]) for position in sampled_positions), dtype=np.int16)
+        for position in sampled_positions:
+            if position == 0:
+                weights = self.histogram[:, available].sum(axis=0)
+            else:
+                weights = self.histogram[int(result[position - 1]), available]
+            chosen = self._weighted_choice(available, weights)
+            result[position] = chosen
+            available = available[available != chosen]
+        return result
+
+
+class NHBSA(_HistogramSampler):
+    """Node/position Histogram-Based Sampling Algorithm."""
+
+    def _build_histogram(self, selected: np.ndarray) -> np.ndarray:
+        n = self.config.problem_size
+        histogram = np.full((n, n), (len(selected) / n) * self.config.bias_ratio, dtype=np.float64)
+        for permutation in selected:
+            histogram[np.arange(n), permutation.astype(int)] += 1.0
+        return histogram
+
+    def _sample_wo(self) -> np.ndarray:
+        n = self.config.problem_size
+        result = np.empty(n, dtype=np.int16)
+        used = np.zeros(n, dtype=bool)
+        for position in range(n):
+            candidates = np.flatnonzero(~used)
+            chosen = self._weighted_choice(candidates, self.histogram[position, candidates])
+            result[position] = chosen; used[chosen] = True
+        return result
+
+    def _sample_wt(self, template: np.ndarray) -> np.ndarray:
+        sampled_positions = self._sample_positions()
+        result = np.asarray(template, dtype=np.int16).copy()
+        available = np.asarray(sorted(int(result[position]) for position in sampled_positions), dtype=np.int16)
+        for position in sampled_positions:
+            chosen = self._weighted_choice(available, self.histogram[position, available])
+            result[position] = chosen
+            available = available[available != chosen]
+        return result
