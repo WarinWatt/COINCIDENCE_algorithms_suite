@@ -6,6 +6,8 @@ The suite exposes four reusable scalar-objective permutation models:
 - `TemplateROSE` / **Template-ROSE-MultiRef Mean** — original model with HBSA punched-template reconstruction.
 - `ROSESingleRef` / **ROSE-SingleRef Range** — selects one real reference and samples its learned signed-distance range.
 - `TemplateROSESingleRef` / **Template-ROSE-SingleRef Range** — the range sampler for removed template items.
+- `ROSESingleRefHistogram` / **ROSE-SingleRef Histogram** — retains the full empirical signed-distance distribution.
+- `TemplateROSESingleRefHistogram` / **Template-ROSE-SingleRef Histogram** — punched-template empirical-histogram baseline.
 
 The original class and algorithm IDs remain backward compatible. Only their
 display names now state the sampling behavior explicitly.
@@ -32,3 +34,12 @@ its rounded mean. An unusable pair falls back to the exact-position estimator.
 fallback rates, sampled and realized distance mean/SD, offspring diversity, and
 template counts. `pair_statistics(i,j)` returns count, mean, minimum, maximum,
 and standard deviation directly from the compact matrices.
+
+## Empirical-histogram research baseline
+
+The Histogram variants preserve the alternative implementation developed while
+clarifying SingleRef. They store `H[i,j,d]`, select one real reference, and
+score free positions from the complete empirical signed-distance distribution.
+This can retain separated modes that mean/SD range sampling smooths over, but
+requires `O(n³)` memory. Keeping it under an explicit name makes that trade-off
+measurable without changing either compact ROSE definition.

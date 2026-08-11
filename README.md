@@ -36,6 +36,7 @@ components suitable for:
 | EDA | NHBSA-WO / NHBSA-WT | node-position histogram sampling without/with a punched template |
 | EDA | ROSE-MultiRef Mean / Template-ROSE-MultiRef Mean | exact positions plus mean signed-distance evidence from several references; original baseline |
 | EDA | ROSE-SingleRef Range / Template-ROSE-SingleRef Range | one real reference plus compact mean/min/max/SD range sampling |
+| EDA | ROSE-SingleRef Histogram / Template-ROSE-SingleRef Histogram | one real reference plus the full empirical signed-distance histogram |
 | pymoo adapter | GA, NSGA-II, NSGA-III, SPEA2 | OX and ERX permutation comparisons where applicable |
 
 Every COIN representation can run with scalar cohort selection or reusable

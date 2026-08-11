@@ -2,7 +2,9 @@ import numpy as np
 
 from coin.core import PermutationCoinAlgorithm
 from coin.experiments import ExperimentConfiguration, ExperimentRunner
-from coin.models import ROSE, ROSESingleRef, TemplateROSE, TemplateROSESingleRef, RoseConfig
+from coin.models import (ROSE, ROSESingleRef, ROSESingleRefHistogram,
+                         TemplateROSE, TemplateROSESingleRef,
+                         TemplateROSESingleRefHistogram, RoseConfig)
 from coin.problems.flowshop import SMALL_3X2, FlowShopProblem
 
 SELECTED = np.asarray([[0,1,2,3,4],[0,2,1,3,4],[1,0,2,4,3],[0,1,2,4,3],[1,0,2,3,4]], dtype=np.int16)
@@ -69,3 +71,22 @@ def test_reusable_permutation_problem_interface():
     algorithm=PermutationCoinAlgorithm(ROSESingleRef(RoseConfig(3,population_size=8),seed=9),FlowShopProblem(SMALL_3X2.processing_times,("makespan",)))
     for _ in range(3): algorithm.step()
     assert algorithm.evaluations==24
+
+def test_histogram_variant_retains_empirical_modes_and_reports_cubic_storage():
+    left=np.asarray([0,2,3,4,1],dtype=np.int16); right=np.asarray([1,2,3,4,0],dtype=np.int16)
+    model=ROSESingleRefHistogram(RoseConfig(5,population_size=20,selection_ratio=100,smoothing=.001),seed=1)
+    statistics,_=model.statistics(np.vstack([left]*10+[right]*10),np.arange(20)); model.update(statistics,None)
+    pair=model.pair_statistics(0,1)
+    assert pair["observed_distance_values"]==2 and pair["minimum"]==-4 and pair["maximum"]==4
+    assert model.relative.shape==(5,5,9)
+    assert model.diagnostics()["estimator_family"]=="empirical_histogram"
+
+def test_histogram_and_template_histogram_generate_valid_permutations():
+    for cls,template in ((ROSESingleRefHistogram,False),(TemplateROSESingleRefHistogram,True)):
+        model=fitted(cls,template_enabled=template,template_sample_ratio=40)
+        assert all(sorted(row.tolist())==list(range(5)) for row in model.generate_population())
+
+def test_runner_integrates_histogram_variants_with_exact_budget():
+    config=ExperimentConfiguration(algorithms=("rose_single_ref_histogram","template_rose_single_ref_histogram"),objectives=("makespan",),population_size=10,evaluation_budget=30,maximum_generations=3,seeds=(3,))
+    result=ExperimentRunner().run(SMALL_3X2,config)
+    assert len(result.runs)==2 and all(run.evaluations==30 for run in result.runs)
