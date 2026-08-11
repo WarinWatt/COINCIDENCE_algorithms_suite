@@ -13,27 +13,34 @@ def fitted(cls=ROSESingleRef, **overrides):
     statistics, _ = model.statistics(SELECTED, np.arange(len(SELECTED))); model.update(statistics, None)
     return model
 
-def test_relative_histogram_is_signed_symmetric_and_normalized():
-    model = fitted(); np.testing.assert_allclose(model.relative.sum(axis=2), 1)
-    np.testing.assert_array_equal(model.relative_counts[0,1], model.relative_counts[1,0][::-1])
+def test_compact_pair_statistics_are_signed_symmetric_and_quadratic():
+    model = fitted()
+    np.testing.assert_allclose(model.distance_mean, -model.distance_mean.T)
+    np.testing.assert_array_equal(model.distance_min, -model.distance_max.T)
+    np.testing.assert_array_equal(model.distance_count, model.distance_count.T)
+    arrays = (model.exact, model.distance_mean, model.distance_min,
+              model.distance_max, model.distance_sd, model.distance_count)
+    assert all(array.shape == (5, 5) for array in arrays)
 
-def test_multimodal_distances_do_not_collapse_to_mean():
+def test_range_statistics_retain_extremes_and_sample_both_sides():
     left=np.asarray([0,2,3,4,1],dtype=np.int16); right=np.asarray([1,2,3,4,0],dtype=np.int16)
     model=ROSESingleRef(RoseConfig(5,selection_ratio=100,smoothing=.001),seed=1)
     statistics,_=model.statistics(np.vstack([left]*10+[right]*10),np.arange(20)); model.update(statistics,None)
     pair=model.pair_statistics(0,1)
     assert pair["count"]==20 and pair["mean"]==0 and pair["minimum"]==-4 and pair["maximum"]==4
-    assert pair["observed_distance_values"]==2
+    samples=[model._sample_distance(0,1) for _ in range(1000)]
+    assert min(samples)<0<max(samples)
+    assert all(-4<=value<=4 and value!=0 for value in samples)
 
 def test_uniform_reference_selection_is_nearly_uniform():
     model=fitted(); counts={0:0,1:0,2:0}
     for _ in range(6000): counts[model._select_reference(4,[0,1,2])]+=1
     assert all(1800<value<2200 for value in counts.values())
 
-def test_confidence_reference_prefers_lower_entropy():
-    model=fitted(reference_selection="confidence"); n=model.config.problem_size
-    model.relative[0,4]=.001; model.relative[0,4,n]=.992; model.relative[0,4]/=model.relative[0,4].sum()
-    model.relative[1,4]=1/(2*n-1); choices=[model._select_reference(4,[0,1]) for _ in range(2000)]
+def test_confidence_reference_prefers_lower_dispersion():
+    model=fitted(reference_selection="confidence")
+    model.distance_sd[0,4]=.1; model.distance_sd[1,4]=4.0
+    choices=[model._select_reference(4,[0,1]) for _ in range(2000)]
     assert choices.count(0)>choices.count(1)
 
 def test_single_reference_is_valid_and_reproducible():

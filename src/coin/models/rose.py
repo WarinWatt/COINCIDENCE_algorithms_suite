@@ -1,8 +1,8 @@
 """Relative Order Sequence Estimator (ROSE) for permutation problems.
 
-This proof-of-concept learns both exact job positions and signed pairwise
-distances from the selected cohort.  TemplateROSE reuses HBSA's WT position
-punching policy and parent/child replacement semantics.
+The compact reference implementation stores exact node positions plus four
+signed-distance statistics (mean, minimum, maximum, standard deviation) for
+each ordered pair. TemplateROSE reuses HBSA's WT position-punching policy.
 """
 from __future__ import annotations
 
@@ -53,8 +53,11 @@ class RoseConfig:
 @dataclass(slots=True)
 class RoseStatistics:
     exact: np.ndarray
-    relative: np.ndarray
-    relative_counts: np.ndarray
+    distance_mean: np.ndarray
+    distance_min: np.ndarray
+    distance_max: np.ndarray
+    distance_sd: np.ndarray
+    distance_count: np.ndarray
     selected: np.ndarray
     population: np.ndarray
     fitness: np.ndarray
@@ -65,8 +68,11 @@ class ROSE:
         self.config = config
         self._rng = SplitMix64(seed)
         self.exact: np.ndarray | None = None
-        self.relative: np.ndarray | None = None
-        self.relative_counts: np.ndarray | None = None
+        self.distance_mean: np.ndarray | None = None
+        self.distance_min: np.ndarray | None = None
+        self.distance_max: np.ndarray | None = None
+        self.distance_sd: np.ndarray | None = None
+        self.distance_count: np.ndarray | None = None
         self.templates: np.ndarray | None = None
         self.template_fitness: np.ndarray | None = None
         self._pending_parents: list[np.ndarray] = []
@@ -85,6 +91,7 @@ class ROSE:
         self._uniform_fallbacks = 0
         self._reference_counts = np.zeros(config.problem_size, dtype=np.int64)
         self._sampled_distances: list[int] = []
+        self._realized_distances: list[int] = []
         self._fixed_reference_count = 0
         self._new_reference_count = 0
 
@@ -138,41 +145,57 @@ class ROSE:
         if self.config.reference_selection != "mean":
             reference = self._select_reference(job, window)
             self._reference_counts[reference] += 1
-            relative_scores = np.empty(len(free), dtype=float)
-            offset = self.config.problem_size - 1
-            distribution = self.relative[reference, job]
-            informative = self.relative_counts is not None and self.relative_counts[reference, job].sum() > 0
-            if not informative:
+            if self.distance_count is None or self.distance_count[reference, job] == 0:
                 self._exact_fallbacks += 1
                 return self._softmax(node)
-            for free_index, target in enumerate(free):
-                delta = int(target - positions[reference])
-                tensor_index = delta + offset
-                relative_scores[free_index] = np.log(max(float(distribution[tensor_index]), eps)) if delta and 0 <= tensor_index < len(distribution) else np.log(eps)
+            sampled_distance = self._sample_distance(reference, job)
+            target = float(positions[reference] + sampled_distance)
+            scale = max(float(self.distance_sd[reference, job]), 1.0)
+            relative_scores = -np.abs(free.astype(float) - target) / scale
+            self._sampled_distances.append(sampled_distance)
             self._relative_samples += 1
             score = self.config.node_weight * node + (1.0 - self.config.node_weight) * relative_scores
             return self._softmax(score)
-        relative_scores = np.empty(len(free), dtype=float)
-        offset = self.config.problem_size - 1
-        if self.config.sampling_mode == "mean_anchor":
-            anchor = float(np.mean([positions[item] for item in window]))
-        for free_index, target in enumerate(free):
-            evidence = []
-            for prior in window:
-                delta = int(target - positions[prior]) if self.config.sampling_mode == "pairwise_window" else int(round(target - anchor))
-                tensor_index = delta + offset
-                probability = self.relative[prior, job, tensor_index] if delta and 0 <= tensor_index < self.relative.shape[2] else eps
-                evidence.append(np.log(max(float(probability), eps)))
-            relative_scores[free_index] = float(np.mean(evidence))
+        informative = [prior for prior in window if self.distance_count[prior, job] > 0]
+        if not informative:
+            self._exact_fallbacks += 1
+            return self._softmax(node)
+        predicted = np.asarray([
+            positions[prior] + self.distance_mean[prior, job] for prior in informative
+        ], dtype=float)
+        target = float(predicted.mean())
+        scale = max(float(np.mean([self.distance_sd[prior, job] for prior in informative])), 1.0)
+        relative_scores = -np.abs(free.astype(float) - target) / scale
         score = self.config.node_weight * node + (1.0 - self.config.node_weight) * relative_scores
         return self._softmax(score)
+
+    def _uniform01(self) -> float:
+        return (self._rng.randbelow(1 << 53) + 0.5) / float(1 << 53)
+
+    def _sample_distance(self, reference: int, job: int) -> int:
+        """Sample an integer from a truncated normal over the learned range."""
+        low = int(self.distance_min[reference, job])
+        high = int(self.distance_max[reference, job])
+        mean = float(self.distance_mean[reference, job])
+        sd = float(self.distance_sd[reference, job])
+        if low == high or sd <= 1e-12:
+            return int(np.clip(round(mean), low, high))
+        for _ in range(32):
+            radius = np.sqrt(-2.0 * np.log(self._uniform01()))
+            normal = radius * np.cos(2.0 * np.pi * self._uniform01())
+            candidate = int(round(mean + sd * normal))
+            if low <= candidate <= high and candidate != 0:
+                return candidate
+        choices = [value for value in range(low, high + 1) if value != 0]
+        self._uniform_fallbacks += 1
+        return choices[self._rng.randbelow(len(choices))] if choices else int(np.clip(round(mean), low, high))
 
     def _select_reference(self, job: int, window: list[int]) -> int:
         candidates = np.asarray(window, dtype=np.int16)
         if self.config.reference_selection == "uniform" or len(candidates) == 1:
             return int(candidates[self._rng.randbelow(len(candidates))])
-        entropies = np.asarray([self._distribution_entropy(self.relative[int(reference), job]) for reference in candidates])
-        confidence = 1.0 / np.maximum(entropies, 1e-9)
+        dispersion = np.asarray([self.distance_sd[int(reference), job] for reference in candidates])
+        confidence = 1.0 / np.maximum(dispersion, 1e-9)
         median = float(np.median(confidence))
         if median > 0:
             confidence = np.minimum(confidence, median * 10.0)
@@ -217,7 +240,7 @@ class ROSE:
                 if len(chosen):
                     if int(chosen[0]) in fixed_jobs_set: self._fixed_reference_count += 1
                     else: self._new_reference_count += 1
-                    self._sampled_distances.append(int(position - positions[int(chosen[0])]))
+                    self._realized_distances.append(int(position - positions[int(chosen[0])]))
             result[position] = job; positions[int(job)] = position; history.append(int(job))
             free = free[free != position]
         if sorted(result.tolist()) != list(range(n)):
@@ -250,26 +273,23 @@ class ROSE:
         self._offspring_unique += len({tuple(row) for row in population.tolist()})
         return population
 
-    def _fit_estimators(self, selected: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _fit_estimators(self, selected: np.ndarray) -> tuple[np.ndarray, ...]:
         n = self.config.problem_size
         exact = np.full((n, n), self.config.smoothing, dtype=float)
-        relative = np.full((n, n, 2 * n - 1), self.config.smoothing, dtype=float)
-        relative_counts = np.zeros((n, n, 2 * n - 1), dtype=np.int64)
-        relative[:, :, n - 1] = 0.0
-        for permutation in selected:
-            position = np.empty(n, dtype=np.int64)
-            position[permutation.astype(int)] = np.arange(n)
-            exact[permutation.astype(int), np.arange(n)] += 1.0
-            for first in range(n):
-                for second in range(n):
-                    if first != second:
-                        index = position[second] - position[first] + n - 1
-                        relative[first, second, index] += 1.0
-                        relative_counts[first, second, index] += 1
+        positions = np.empty((len(selected), n), dtype=np.int32)
+        for row, permutation in enumerate(selected):
+            jobs = permutation.astype(int)
+            exact[jobs, np.arange(n)] += 1.0
+            positions[row, jobs] = np.arange(n)
         exact /= exact.sum(axis=1, keepdims=True)
-        totals = relative.sum(axis=2, keepdims=True)
-        relative = np.divide(relative, totals, out=np.zeros_like(relative), where=totals > 0)
-        return exact, relative, relative_counts
+        distances = positions[:, None, :] - positions[:, :, None]
+        distance_mean = distances.mean(axis=0, dtype=np.float64)
+        distance_min = distances.min(axis=0).astype(np.int32)
+        distance_max = distances.max(axis=0).astype(np.int32)
+        distance_sd = distances.std(axis=0, dtype=np.float64)
+        distance_count = np.full((n, n), len(selected), dtype=np.int32)
+        np.fill_diagonal(distance_count, 0)
+        return exact, distance_mean, distance_min, distance_max, distance_sd, distance_count
 
     def statistics(self, population: np.ndarray, fitness: np.ndarray) -> tuple[RoseStatistics, None]:
         survivors = np.asarray(population, dtype=np.int16).copy()
@@ -284,12 +304,19 @@ class ROSE:
         if self.config.objective == "max": order = order[::-1]
         count = max(1, round(len(survivors) * self.config.selection_ratio / 100))
         selected = survivors[order[:count]]
-        exact, relative, relative_counts = self._fit_estimators(selected)
+        exact, distance_mean, distance_min, distance_max, distance_sd, distance_count = self._fit_estimators(selected)
         self.effective_population = survivors; self.effective_fitness = survivor_fitness
-        return RoseStatistics(exact, relative, relative_counts, selected.copy(), survivors, survivor_fitness), None
+        return RoseStatistics(exact, distance_mean, distance_min, distance_max,
+                              distance_sd, distance_count, selected.copy(),
+                              survivors, survivor_fitness), None
 
     def update(self, statistics: RoseStatistics, _unused: None) -> None:
-        self.exact = statistics.exact; self.relative = statistics.relative; self.relative_counts = statistics.relative_counts
+        self.exact = statistics.exact
+        self.distance_mean = statistics.distance_mean
+        self.distance_min = statistics.distance_min
+        self.distance_max = statistics.distance_max
+        self.distance_sd = statistics.distance_sd
+        self.distance_count = statistics.distance_count
         self.templates = statistics.population.copy(); self.template_fitness = statistics.fitness.copy()
 
     @staticmethod
@@ -303,7 +330,11 @@ class ROSE:
         total = max(1, self._offspring_total)
         return {
             "exact_position_entropy": None if self.exact is None else self._entropy(self.exact, 1),
-            "relative_position_entropy": None if self.relative is None else self._entropy(self.relative, 2),
+            "relative_sd_mean": None if self.distance_sd is None else float(self.distance_sd[self.distance_count > 0].mean()),
+            "estimator_memory_bytes": None if self.distance_mean is None else int(
+                self.exact.nbytes + self.distance_mean.nbytes + self.distance_min.nbytes
+                + self.distance_max.nbytes + self.distance_sd.nbytes + self.distance_count.nbytes
+            ),
             "unique_offspring_count": self._offspring_unique,
             "duplicate_rate": 1.0 - self._offspring_unique / total,
             "offspring_improvement_rate": self._improved / total,
@@ -316,6 +347,8 @@ class ROSE:
             "reference_entropy": self._distribution_entropy(self._reference_counts / max(1, self._reference_counts.sum())),
             "sampled_distance_mean": float(np.mean(self._sampled_distances)) if self._sampled_distances else 0.0,
             "sampled_distance_sd": float(np.std(self._sampled_distances)) if self._sampled_distances else 0.0,
+            "realized_distance_mean": float(np.mean(self._realized_distances)) if self._realized_distances else 0.0,
+            "realized_distance_sd": float(np.std(self._realized_distances)) if self._realized_distances else 0.0,
             "mean_roll_size": float(np.mean(self._roll_sizes)) if self._roll_sizes else 0.0,
             "roll_size_distribution": {str(size): self._roll_sizes.count(size) for size in sorted(set(self._roll_sizes))},
             "template_fixed_positions": self._template_fixed,
@@ -325,27 +358,19 @@ class ROSE:
         }
 
     def pair_statistics(self, reference: int, job: int) -> dict[str, float | int | None]:
-        """Descriptive diagnostics over observed signed distances for one pair."""
-        if self.relative_counts is None:
+        """Return the compact learned signed-distance statistics for a pair."""
+        if self.distance_count is None:
             raise RuntimeError("ROSE estimators have not been fitted")
-        counts = self.relative_counts[reference, job]
-        offset = self.config.problem_size - 1
-        indices = np.flatnonzero(counts)
-        count = int(counts.sum())
+        count = int(self.distance_count[reference, job])
         if not count:
             return {"count": 0, "mean": None, "minimum": None, "maximum": None,
-                    "standard_deviation": None, "entropy": None, "mode": None,
-                    "observed_distance_values": 0}
-        distances = indices - offset
-        probabilities = counts[indices] / count
-        mean = float(np.sum(distances * probabilities))
-        variance = float(np.sum(((distances - mean) ** 2) * probabilities))
+                    "standard_deviation": None}
         return {
-            "count": count, "mean": mean, "minimum": int(distances.min()),
-            "maximum": int(distances.max()), "standard_deviation": float(np.sqrt(variance)),
-            "entropy": self._distribution_entropy(probabilities),
-            "mode": int(distances[int(np.argmax(counts[indices]))]),
-            "observed_distance_values": int(len(indices)),
+            "count": count,
+            "mean": float(self.distance_mean[reference, job]),
+            "minimum": int(self.distance_min[reference, job]),
+            "maximum": int(self.distance_max[reference, job]),
+            "standard_deviation": float(self.distance_sd[reference, job]),
         }
 
 
@@ -358,7 +383,7 @@ class TemplateROSE(ROSE):
 
 
 class ROSESingleRef(ROSE):
-    """ROSE v2: sample one real reference from the active candidate window."""
+    """Single-reference range sampling from mean/min/max/SD statistics."""
     def __init__(self, config: RoseConfig, *, seed: int = 0):
         if config.reference_selection == "mean":
             from dataclasses import replace
@@ -367,7 +392,7 @@ class ROSESingleRef(ROSE):
 
 
 class TemplateROSESingleRef(TemplateROSE):
-    """Template ROSE v2 with one real reference per regenerated job."""
+    """Template ROSE with compact single-reference range sampling."""
     def __init__(self, config: RoseConfig, *, seed: int = 0):
         if config.reference_selection == "mean":
             from dataclasses import replace
