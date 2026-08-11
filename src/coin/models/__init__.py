@@ -7,10 +7,12 @@ from .position import PositionCoin, PositionConfig
 from .cnb_position import CNBCoin
 from .start_node_edge import StartNodeEdgeCoin, StartNodeEdgeCoinModel
 from .hbsa import EHBSA, NHBSA, HBSAConfig, HistogramStatistics
+from .rose import ROSE, TemplateROSE, ROSESingleRef, TemplateROSESingleRef, RoseConfig, RoseStatistics
 
 __all__ = [
     "EdgeConfig", "GenerationRecord", "HybridCoin", "HybridChainCoin", "OptimizedEdgeCoin",
     "PositionCoin", "PositionConfig", "CNBCoin", "ReferenceEdgeCoin", "StartNodeEdgeCoin",
     "StartNodeEdgeCoinModel", "EHBSA", "NHBSA",
+    "ROSE", "TemplateROSE", "ROSESingleRef", "TemplateROSESingleRef", "RoseConfig", "RoseStatistics",
     "HBSAConfig", "HistogramStatistics",
 ]

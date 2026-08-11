@@ -34,11 +34,16 @@ components suitable for:
 | COIN | Start-Node Edge | learn a starting-node distribution and directed edges |
 | EDA | EHBSA-WO / EHBSA-WT | edge histogram sampling without/with a punched template |
 | EDA | NHBSA-WO / NHBSA-WT | node-position histogram sampling without/with a punched template |
+| EDA | ROSE-MeanRef / Template-ROSE-MeanRef | exact positions plus averaged signed-distance evidence; original baseline |
+| EDA | ROSE-SingleRef / Template-ROSE-SingleRef | one real reference and its empirical signed-distance histogram |
 | pymoo adapter | GA, NSGA-II, NSGA-III, SPEA2 | OX and ERX permutation comparisons where applicable |
 
 Every COIN representation can run with scalar cohort selection or reusable
 multi-objective selection based on nondominated depth and diversity. MO runs
 maintain a unique external nondominated archive.
+
+See [ROSE.md](ROSE.md) for reference selection, free-position sampling,
+fallback diagnostics, and the dense `O(n^3)` relative tensor trade-off.
 
 ## Included problem contracts
 

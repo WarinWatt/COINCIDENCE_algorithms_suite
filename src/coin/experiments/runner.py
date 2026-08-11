@@ -10,7 +10,7 @@ from coin.adapters.pymoo.runner import (PymooRunConfig, run_pymoo_ga, run_pymoo_
     run_pymoo_nsga2, run_pymoo_nsga2_erx, run_pymoo_nsga3, run_pymoo_nsga3_erx,
     run_pymoo_spea2, run_pymoo_spea2_erx)
 from coin.core import MultiObjectiveCoinAlgorithm, PermutationCoinAlgorithm
-from coin.models import CNBCoin, EdgeConfig, EHBSA, HBSAConfig, HybridChainCoin, HybridCoin, NHBSA, OptimizedEdgeCoin, PositionCoin, StartNodeEdgeCoin
+from coin.models import CNBCoin, EdgeConfig, EHBSA, HBSAConfig, HybridChainCoin, HybridCoin, NHBSA, OptimizedEdgeCoin, PositionCoin, ROSE, ROSESingleRef, RoseConfig, StartNodeEdgeCoin, TemplateROSE, TemplateROSESingleRef
 from coin.problems.base import evaluate_population
 from coin.problems.flowshop import FlowShopInstance, FlowShopProblem
 from coin.problems.tsptw import MatrixTSPTWInstance, TSPTWInstance, TSPTWProblem
@@ -31,6 +31,10 @@ COIN_FACTORIES = {
     "ehbsa_wt": EHBSA,
     "nhbsa_wo": NHBSA,
     "nhbsa_wt": NHBSA,
+    "rose": ROSE,
+    "rose_single_ref": ROSESingleRef,
+    "template_rose": TemplateROSE,
+    "template_rose_single_ref": TemplateROSESingleRef,
 }
 HBSA_VARIANTS = {
     "ehbsa": ("wo", EHBSA), "nhbsa": ("wo", NHBSA),
@@ -51,6 +55,8 @@ ALGORITHM_NAMES = {
     "ehbsa_wt": "EHBSA-WT · Edge Histogram + template",
     "nhbsa_wo": "NHBSA-WO · Node Histogram",
     "nhbsa_wt": "NHBSA-WT · Node Histogram + template",
+    "rose": "ROSE-MeanRef", "rose_single_ref": "ROSE-SingleRef",
+    "template_rose": "Template-ROSE-MeanRef", "template_rose_single_ref": "Template-ROSE-SingleRef",
     "mo_edge_coin": "MO Edge COIN", "mo_position_coin": "MO NB-COIN", "mo_cnb_coin": "MO CNB-COIN",
     "mo_hybrid_coin": "MO Hybrid Template COIN · Node template → Edge completion",
     "mo_hybrid_chain": "MO Hybrid Chain COIN · Node/Edge per link", "mo_start_node_edge_coin": "MO Start-Node Edge COIN",
@@ -146,7 +152,20 @@ class ExperimentRunner:
                         objective="min", learning_mode=config.learning_mode,
                     )
                     factory = MO_COIN_FACTORIES.get(algorithm_name, COIN_FACTORIES.get(algorithm_name))
-                    if algorithm_name in HBSA_VARIANTS:
+                    if algorithm_name in ("rose", "rose_single_ref", "template_rose", "template_rose_single_ref"):
+                        rose_config = RoseConfig(
+                            problem_size=problem.dimension, population_size=config.population_size,
+                            selection_ratio=config.rose_selection_ratio, roll_mode=config.rose_roll_mode,
+                            fixed_roll=config.rose_fixed_roll, max_roll=config.rose_max_roll,
+                            node_weight=config.rose_node_weight, temperature=config.rose_temperature,
+                            smoothing=config.rose_smoothing,
+                            template_enabled=algorithm_name.startswith("template_"),
+                            template_sample_ratio=config.rose_template_sample_ratio,
+                            reference_selection=(config.rose_reference_selection if "single_ref" in algorithm_name else "mean"),
+                            objective="min",
+                        )
+                        model = factory(rose_config, seed=seed)
+                    elif algorithm_name in HBSA_VARIANTS:
                         sampling_mode, _ = HBSA_VARIANTS[algorithm_name]
                         hbsa_config = HBSAConfig(
                             problem_size=problem.dimension,
@@ -204,6 +223,9 @@ class ExperimentRunner:
                 if algorithm_name in HBSA_VARIANTS:
                     result.metadata["sampling_mode"] = model.config.sampling_mode
                     result.metadata["template_sample_ratio"] = model.config.template_sample_ratio
+                if algorithm_name in ("rose", "rose_single_ref", "template_rose", "template_rose_single_ref"):
+                    result.metadata["rose_diagnostics"] = model.diagnostics()
+                    result.metadata["parameters"] = asdict(model.config)
                 runs.append(attach_reported_objectives(result))
                 completed += 1
         summary = {}

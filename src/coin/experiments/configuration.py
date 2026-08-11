@@ -26,6 +26,15 @@ class ExperimentConfiguration:
     hbsa_template_sample_ratio: int = 50
     parameter_grid: bool = False
     parameter_grid_algorithms: tuple[str, ...] = ()
+    rose_selection_ratio: int = 20
+    rose_roll_mode: str = "random"
+    rose_fixed_roll: int = 3
+    rose_max_roll: int = 5
+    rose_node_weight: float = 0.25
+    rose_temperature: float = 1.0
+    rose_smoothing: float = 1.0
+    rose_template_sample_ratio: int = 50
+    rose_reference_selection: str = "uniform"
 
     def __post_init__(self):
         if not self.algorithms:
@@ -51,3 +60,10 @@ class ExperimentConfiguration:
         allowed_grids = {"edge_coin", "position_coin", "ehbsa", "nhbsa"}
         if set(self.parameter_grid_algorithms) - allowed_grids:
             raise ValueError("parameter_grid_algorithms contains an unsupported algorithm")
+        if not 1 <= self.rose_selection_ratio <= 100: raise ValueError("invalid ROSE selection ratio")
+        if self.rose_roll_mode not in ("fixed", "random", "all"): raise ValueError("invalid ROSE roll mode")
+        if self.rose_fixed_roll < 1 or self.rose_max_roll < 1: raise ValueError("ROSE roll sizes must be positive")
+        if not 0 <= self.rose_node_weight <= 1: raise ValueError("ROSE node weight must be between 0 and 1")
+        if self.rose_temperature <= 0 or self.rose_smoothing <= 0: raise ValueError("ROSE temperature and smoothing must be positive")
+        if not 0 <= self.rose_template_sample_ratio <= 100: raise ValueError("invalid ROSE template ratio")
+        if self.rose_reference_selection not in ("uniform", "confidence"): raise ValueError("invalid ROSE reference selection")
